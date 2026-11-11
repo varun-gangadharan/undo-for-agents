@@ -34,10 +34,13 @@ async def main(kind: str) -> None:
         await call("run", command="ls")
         await call("rewind", step=bad["step"], reason="deleted the project by mistake")
         restored = await call("run", command="ls")
-        await call("timeline")
+        tl = await call("timeline")
+        print("rewinds:", json.dumps(tl["rewinds"]))
         await call("rewind", step=99)
         ok = all(f in restored["stdout"] for f in ("main.py", "notes.txt"))
+        logged = tl["rewinds"] and tl["rewinds"][0]["reason"] == "deleted the project by mistake"
         print("PASS" if ok else "FAIL", "- files back after rewind")
+        print("PASS" if logged else "FAIL", "- rewind and reason kept in timeline")
 
 
 asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else "fake"))

@@ -40,6 +40,7 @@ For pytest, run `apt-get update -qq`, then `apt-get install -y -qq python3-pytes
 mcp = MCPServer("undo", instructions=INSTRUCTIONS)
 _lock = threading.Lock()
 _engine: Any = None
+_rewinds: list[dict] = []
 _STATE = Path(tempfile.gettempdir()) / f"undo-mcp-{os.getpid()}.json"
 
 
@@ -98,7 +99,8 @@ def run(command: str) -> dict:
     """Checkpoint the sandbox, then run ONE shell command in /workspace.
 
     Returns the step number (use it with `rewind`), exit code, output, and the files
-    the command added, removed or modified.
+    the command added, removed or modified. Change tracking covers regular files only;
+    __pycache__ and .pytest_cache are ignored. Rewind still restores everything.
     """
     with _session():
         return _step_dict(_get_engine().run(command))
@@ -108,7 +110,8 @@ def run(command: str) -> dict:
 def rewind(step: int, reason: str = "") -> dict:
     """Undo step `step` and everything after it, restoring the sandbox to just before it ran.
 
-    `reason` is a short note on what went wrong, shown in the timeline.
+    Undone steps leave the step list and later commands reuse their numbers; the rewind
+    itself, with `reason` and the undone commands, is kept in `timeline()["rewinds"]`.
     """
     with _session():
         engine = _get_engine()
@@ -119,7 +122,10 @@ def rewind(step: int, reason: str = "") -> dict:
         restored = []
         if before is not None and after is not None:
             restored = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
+        undone = [f"{s.index + 1}. {s.command}" for s in steps[step - 1:]]
         engine.rewind(step - 1)
+        _rewinds.append({"rewound_to_before_step": step, "reason": reason,
+                         "undone_steps": undone, "files_restored": restored})
         return {
             "rewound_to_before_step": step,
             "reason": reason,
@@ -131,14 +137,18 @@ def rewind(step: int, reason: str = "") -> dict:
 
 @mcp.tool()
 def timeline() -> dict:
-    """List every step so far with its command, exit code and changed files."""
+    """List the current steps (command, exit code, changed files) and every rewind so far.
+
+    `rewinds` is in chronological order; each entry lists the steps it undid and why.
+    """
     with _session():
         steps = _get_engine().steps()
         return {
             "steps": [
                 {k: v for k, v in _step_dict(s).items() if k not in ("stdout", "stderr")}
                 for s in steps
-            ]
+            ],
+            "rewinds": _rewinds,
         }
 
 
@@ -150,6 +160,7 @@ def reset() -> dict:
         if _engine is not None:
             _engine.cleanup()
             _engine = None
+        _rewinds.clear()
         _get_engine()
         return {"ok": True, "message": "Started a fresh sandbox."}
 
