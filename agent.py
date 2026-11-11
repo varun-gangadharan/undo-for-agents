@@ -29,6 +29,8 @@ SYSTEM_PROMPT = (
     "Use web_search only if you need information you don't have. "
     "When the task is done, stop calling tools and reply with a one-sentence summary."
 )
+SELF_UNDO_PROMPT = " Every command is checkpointed. If you break something, prefer rewind_to over manual fixes."
+MAX_SELF_REWINDS = 2
 
 TOOLS = [
     {
@@ -53,6 +55,24 @@ TOOLS = [
     },
 ]
 
+REWIND_TOOL = {
+    "name": "rewind_to",
+    "description": (
+        "Undo your own mistake: restore the sandbox to the state from BEFORE step_index ran. "
+        "Use this when a check (like tests) fails because of something you changed earlier, "
+        "instead of patching on top of the mistake."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "step_index": {"type": "integer", "description": "The step to undo; it and every later step are removed."},
+            "reason": {"type": "string", "description": "Why this step was a mistake."},
+        },
+        "required": ["step_index", "reason"],
+        "additionalProperties": False,
+    },
+}
+
 
 def _truncate(text: str) -> str:
     if len(text) <= MAX_OUTPUT:
@@ -62,7 +82,36 @@ def _truncate(text: str) -> str:
 
 def _format_step(step: Step) -> str:
     return _truncate(
+        f"This was step {step.index}.\n"
         f"exit_code: {step.exit_code}\nstdout:\n{step.stdout}\nstderr:\n{step.stderr}"
+    )
+
+
+def _list_steps(steps: list[Step]) -> str:
+    if not steps:
+        return "(none)"
+    return "; ".join(f"step {s.index}: $ {s.command} (exit {s.exit_code})" for s in steps)
+
+
+def _self_rewind(
+    engine: Engine,
+    tool_input: dict,
+    rewinds_used: int,
+    on_rewind: Optional[Callable[[int, str], None]],
+) -> tuple[str, bool]:
+    if rewinds_used >= MAX_SELF_REWINDS:
+        return f"Rewind limit of {MAX_SELF_REWINDS} per run reached; fix forward instead.", True
+    index, reason = tool_input.get("step_index"), tool_input.get("reason", "")
+    existing = [s.index for s in engine.steps()]
+    if not isinstance(index, int) or index not in existing:
+        return f"No step {index}. Existing steps: {existing or 'none'}.", True
+    engine.rewind(index)
+    if on_rewind:
+        on_rewind(index, reason)
+    return (
+        f"Sandbox restored to before step {index}. Steps {index} and later no longer exist. "
+        f"Current steps: {_list_steps(engine.steps())}.",
+        False,
     )
 
 
@@ -92,17 +141,22 @@ def run_agent(
     task: str,
     on_step: Optional[Callable[[Step], None]] = None,
     max_steps: int = 8,
+    allow_self_undo: bool = False,
+    on_rewind: Optional[Callable[[int, str], None]] = None,
 ) -> str:
     client = anthropic.Anthropic()
+    system = SYSTEM_PROMPT + SELF_UNDO_PROMPT if allow_self_undo else SYSTEM_PROMPT
+    tools = TOOLS + [REWIND_TOOL] if allow_self_undo else TOOLS
     messages: list[dict] = [{"role": "user", "content": _build_user_message(engine, task)}]
     steps_run = 0
+    rewinds_used = 0
 
     while True:
         response = client.messages.create(
             model=MODEL,
             max_tokens=16000,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
+            system=system,
+            tools=tools,
             messages=messages,
         )
         if response.stop_reason == "refusal":
@@ -126,6 +180,10 @@ def run_agent(
                 output, is_error = _format_step(step), False
             elif block.name == "web_search":
                 output, is_error = _web_search(block.input["query"]), False
+            elif block.name == "rewind_to" and allow_self_undo:
+                output, is_error = _self_rewind(engine, block.input, rewinds_used, on_rewind)
+                if not is_error:
+                    rewinds_used += 1
             else:
                 output, is_error = f"Unknown tool: {block.name}", True
             results.append(
