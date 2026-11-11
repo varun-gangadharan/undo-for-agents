@@ -27,10 +27,26 @@ from dotenv import load_dotenv
 from contracts import Step
 
 
+def diff_files(
+    before: dict[str, str] | None, after: dict[str, str]
+) -> tuple[list[str], list[str], list[str]]:
+    """Return (added, removed, modified) paths. With no baseline, nothing is reported."""
+    if before is None:
+        return [], [], []
+    added = sorted(after.keys() - before.keys())
+    removed = sorted(before.keys() - after.keys())
+    modified = sorted(p for p in after.keys() & before.keys() if after[p] != before[p])
+    return added, removed, modified
+
+
 class ArchilEngine:
     """An Engine implementation that saves Archil sandbox forks as checkpoints."""
 
     _RISKY_COMMAND_MARKERS = ("rm", "mv", ">", "git reset", "pip uninstall")
+    _HASH_CMD = (
+        "find /workspace -type f -not -path '*/__pycache__/*' -not -path '*/.pytest_cache/*' "
+        "-exec md5sum {} + 2>/dev/null"
+    )
 
     def __init__(self, name: str = "undo-for-agents") -> None:
         # Load credentials before importing/initializing the SDK client.
@@ -42,6 +58,8 @@ class ArchilEngine:
         self._steps: list[Step] = []
         self._sandboxes: dict[str, Any] = {}
         self._fork_serial = 0
+        self.track_files = True
+        self.initial_file_hashes: dict[str, str] | None = None
 
     def start(self) -> None:
         if self._current is not None:
@@ -69,6 +87,7 @@ class ArchilEngine:
         self._checkpoints = []
         self._steps = []
         self._fork_serial = 0
+        self.initial_file_hashes = self._hash_files(sandbox) if self.track_files else None
 
     def run(self, cmd: str) -> Step:
         current = self._require_current()
@@ -87,6 +106,10 @@ class ArchilEngine:
             duration_s=duration_s,
             fork_s=fork_s,
         )
+        if self.track_files:
+            step.file_hashes = self._hash_files(current)
+            if step.file_hashes is not None:
+                step.added, step.removed, step.modified = diff_files(self._last_hashes(), step.file_hashes)
         self._store_checkpoint(index, checkpoint)
         self._steps.append(step)
         return step
@@ -148,6 +171,24 @@ class ArchilEngine:
     def _store_checkpoint(self, index: int, checkpoint: Any) -> None:
         if index == len(self._checkpoints):
             self._checkpoints.append(checkpoint)
+
+    def _last_hashes(self) -> dict[str, str] | None:
+        for step in reversed(self._steps):
+            if step.file_hashes is not None:
+                return step.file_hashes
+        return self.initial_file_hashes
+
+    def _hash_files(self, sandbox: Any) -> dict[str, str] | None:
+        try:
+            result = sandbox.exec(self._HASH_CMD)
+        except Exception:
+            return None
+        hashes = {}
+        for line in (result.stdout or "").splitlines():
+            digest, _, path = line.partition("  ")
+            if path:
+                hashes[path.removeprefix("/workspace/")] = digest
+        return hashes
 
     def _fork_name(self, label: str) -> str:
         name = f"{self._session_name or self._name}-{label}-{self._fork_serial}"

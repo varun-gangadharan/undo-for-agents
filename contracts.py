@@ -1,8 +1,8 @@
 """Shared types every module agrees on. Change only with the whole team."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Optional, Protocol
 
 
 @dataclass
@@ -14,6 +14,10 @@ class Step:
     exit_code: int
     duration_s: float
     fork_s: float  # time spent forking the checkpoint taken before this step
+    file_hashes: Optional[dict[str, str]] = None  # path -> md5 after the step; None if not tracked
+    added: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+    modified: list[str] = field(default_factory=list)
 
 
 class Engine(Protocol):

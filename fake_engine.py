@@ -6,11 +6,13 @@ Anything else returns canned output.
 from __future__ import annotations
 
 import copy
+import hashlib
 import random
 import shlex
 import time
 
 from contracts import Step
+from engine import diff_files
 
 
 class FakeEngine:
@@ -19,12 +21,15 @@ class FakeEngine:
         self._steps: list[Step] = []
         self._checkpoints: list[dict[str, str]] = []
         self._started = False
+        self.track_files = True
+        self.initial_file_hashes: dict[str, str] | None = None
 
     def start(self) -> None:
         self._files = {"README.md": "# demo project\n", "main.py": "print('hi')\n"}
         self._steps = []
         self._checkpoints = []
         self._started = True
+        self.initial_file_hashes = self._hash_files() if self.track_files else None
 
     def run(self, cmd: str) -> Step:
         if not self._started:
@@ -39,6 +44,9 @@ class FakeEngine:
         duration_s = time.perf_counter() - t1 + random.uniform(0.05, 0.3)
 
         step = Step(len(self._steps), cmd, stdout, stderr, code, duration_s, fork_s)
+        if self.track_files:
+            step.file_hashes = self._hash_files()
+            step.added, step.removed, step.modified = diff_files(self._last_hashes(), step.file_hashes)
         self._steps.append(step)
         return step
 
@@ -55,6 +63,19 @@ class FakeEngine:
     def cleanup(self) -> None:
         self._files, self._steps, self._checkpoints = {}, [], []
         self._started = False
+
+    def _last_hashes(self) -> dict[str, str] | None:
+        for step in reversed(self._steps):
+            if step.file_hashes is not None:
+                return step.file_hashes
+        return self.initial_file_hashes
+
+    def _hash_files(self) -> dict[str, str]:
+        return {
+            path: hashlib.md5(content.encode()).hexdigest()
+            for path, content in self._files.items()
+            if not path.endswith("/")
+        }
 
     def _execute(self, cmd: str) -> tuple[str, str, int]:
         if ">" in cmd and cmd.strip().startswith("echo"):

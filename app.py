@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import atexit
 import os
-from typing import Any
+from typing import Any, Optional
 
 import streamlit as st
 
@@ -43,7 +43,7 @@ def _engine_kind() -> str:
 def _new_engine(kind: str) -> Any:
     """Build an engine without importing the optional Archil implementation."""
     if kind == "archil":
-        from engine import ArchilEngine  # Lazy: fake mode needs no Archil deps.
+        from engine import ArchilEngine
 
         return ArchilEngine()
 
@@ -58,6 +58,7 @@ def _ensure_engine() -> Any:
     if "engine" not in st.session_state:
         try:
             engine = _new_engine(kind)
+            engine.track_files = st.session_state.get("show_diff", True)
             with st.spinner("Starting sandbox…"):
                 engine.start()
         except Exception as exc:
@@ -67,8 +68,8 @@ def _ensure_engine() -> Any:
         st.session_state.engine = engine
         st.session_state.engine_kind = kind
         st.session_state.agent_unavailable = False
-        st.session_state.rewound_step = None
-        st.session_state.live_steps = []
+        st.session_state.markers = []
+        st.session_state.has_run = False
     return st.session_state.engine
 
 
@@ -80,22 +81,62 @@ def _reset_engine() -> None:
                 old_engine.cleanup()
         except Exception:
             pass
-    st.session_state.pop("last_agent_result", None)
+    for key in ("last_agent_result", "restore_banner"):
+        st.session_state.pop(key, None)
     _ensure_engine()
 
 
-def _render_step(step: Any) -> None:
-    """Render one immutable command checkpoint card."""
+def _latest_hashes(engine: Any) -> Optional[dict[str, str]]:
+    return _hashes_before(engine, len(engine.steps()))
+
+
+def _hashes_before(engine: Any, index: int) -> Optional[dict[str, str]]:
+    """File hashes as they were just before step `index` ran."""
+    for step in reversed(engine.steps()[:index]):
+        if step.file_hashes is not None:
+            return step.file_hashes
+    return getattr(engine, "initial_file_hashes", None)
+
+
+def _changed_files(a: Optional[dict[str, str]], b: Optional[dict[str, str]]) -> list[str]:
+    if a is None or b is None:
+        return []
+    return sorted(p for p in a.keys() | b.keys() if a.get(p) != b.get(p))
+
+
+def _md(text: str) -> str:
+    for ch in "\\`*_[]<>#|~$":
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
+def _render_chips(step: Any) -> None:
+    chips = (
+        [f":green-badge[+ {_md(p)}]" for p in getattr(step, "added", [])]
+        + [f":red-badge[− {_md(p)}]" for p in getattr(step, "removed", [])]
+        + [f":yellow-badge[\\~ {_md(p)}]" for p in getattr(step, "modified", [])]
+    )
+    if chips:
+        st.markdown(" ".join(chips))
+
+
+def _render_marker(marker: dict) -> None:
+    with st.container(border=True):
+        st.markdown(f"🩹 **Agent rewound to before step {marker['at'] + 1}:** {marker['reason']}")
+        if marker.get("restored"):
+            st.caption("Restored: " + ", ".join(marker["restored"]))
+
+
+def _render_step(step: Any, show_diff: bool, interactive: bool) -> None:
     with st.container(border=True):
         left, right = st.columns([4, 1])
         left.subheader(f"Step {step.index + 1}")
-        with right:
-            if step.exit_code == 0:
-                st.markdown(f":green[**Exit code: {step.exit_code}**]")
-            else:
-                st.markdown(f":red[**Exit code: {step.exit_code}**]")
+        color = "green" if step.exit_code == 0 else "red"
+        right.markdown(f":{color}[**Exit code: {step.exit_code}**]")
 
         st.code(step.command, language="bash")
+        if show_diff:
+            _render_chips(step)
         st.caption(f"Fork time: {step.fork_s:.3f}s")
         with st.expander("Output"):
             output = step.stdout
@@ -103,73 +144,103 @@ def _render_step(step: Any) -> None:
                 output += ("\n" if output else "") + step.stderr
             st.code(output or "(no output)", language="text")
 
-        if st.button(
+        if interactive and st.button(
             "⏪ Rewind to before this step",
             key=f"rewind-{step.index}",
             use_container_width=True,
         ):
-            try:
-                with st.spinner(f"Rewinding to before step {step.index + 1}…"):
-                    st.session_state.engine.rewind(step.index)
-            except Exception as exc:
-                st.session_state.flash_error = _friendly_error("Rewind", exc)
-            else:
-                st.session_state.rewound_step = step.index + 1
-            st.rerun()
+            _rewind(step.index)
 
 
-def _run_agent(engine: Any, instruction: str, live_area: Any) -> None:
-    """Run an instruction and keep the timeline visibly live while it runs."""
+def _render_timeline(engine: Any, show_diff: bool, interactive: bool) -> None:
+    steps = engine.steps()
+    markers = st.session_state.get("markers", [])
+    if not steps and not markers:
+        st.caption("No steps yet. Run a task to create the first checkpoint.")
+    for step in steps:
+        for marker in markers:
+            if marker["at"] == step.index:
+                _render_marker(marker)
+        _render_step(step, show_diff, interactive)
+    for marker in markers:
+        if marker["at"] >= len(steps):
+            _render_marker(marker)
+
+
+def _rewind(index: int) -> None:
+    engine = st.session_state.engine
+    restored = _changed_files(_latest_hashes(engine), _hashes_before(engine, index))
+    try:
+        with st.spinner(f"Rewinding to before step {index + 1}…"):
+            engine.rewind(index)
+    except Exception as exc:
+        st.session_state.flash_error = _friendly_error("Rewind", exc)
+    else:
+        st.session_state.markers = [m for m in st.session_state.markers if m["at"] <= index]
+        st.session_state.restore_banner = {"step": index + 1, "restored": restored}
+    st.rerun()
+
+
+def _run_agent(engine: Any, instruction: str, timeline: Any, show_diff: bool, self_undo: bool) -> None:
+    """Run an instruction, redrawing the timeline placeholder live as steps arrive."""
     if not instruction.strip():
         st.warning("Enter an instruction first.")
         return
 
-    st.session_state.live_steps = []
+    st.session_state.pop("restore_banner", None)
+    last_hashes = [_latest_hashes(engine)]
+
+    def redraw() -> None:
+        with timeline.container():
+            _render_timeline(engine, show_diff, interactive=False)
 
     def on_step(step: Any) -> None:
-        # The engine already owns the canonical history.  This placeholder is
-        # only for immediate feedback during a long-running agent invocation.
-        st.session_state.live_steps.append(step)
-        live_area.markdown(
-            "\n\n".join(
-                f"Running step {item.index + 1}: `{item.command}`"
-                for item in st.session_state.live_steps
-            )
-        )
+        if step.file_hashes is not None:
+            last_hashes[0] = step.file_hashes
+        redraw()
+
+    def on_rewind(index: int, reason: str) -> None:
+        restored = _changed_files(last_hashes[0], _hashes_before(engine, index))
+        last_hashes[0] = _hashes_before(engine, index)
+        markers = [m for m in st.session_state.markers if m["at"] <= index]
+        markers.append({"at": index, "reason": reason, "restored": restored})
+        st.session_state.markers = markers
+        redraw()
 
     try:
         with st.spinner("Agent is working…"):
-            result = agent.run_agent(
-                engine,
-                instruction,
-                on_step=on_step,
-                max_steps=MAX_AGENT_STEPS,
-            )
+            try:
+                result = agent.run_agent(
+                    engine,
+                    instruction,
+                    on_step=on_step,
+                    max_steps=MAX_AGENT_STEPS,
+                    allow_self_undo=self_undo,
+                    on_rewind=on_rewind,
+                )
+            except TypeError as exc:
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                if self_undo:
+                    st.session_state.flash_info = "Self-undo isn't available in this agent version yet."
+                result = agent.run_agent(engine, instruction, on_step=on_step, max_steps=MAX_AGENT_STEPS)
     except NotImplementedError:
         st.session_state.agent_unavailable = True
-        st.info("The agent loop is not available yet. Run a command directly below.")
     except Exception as exc:
-        st.error(_friendly_error("The agent run", exc) + " Steps that finished are kept below.")
-        st.session_state.rewound_step = None
+        st.session_state.flash_error = (
+            _friendly_error("The agent run", exc) + " Steps that finished are kept below."
+        )
     else:
         if result:
             st.session_state.last_agent_result = result
-        st.session_state.rewound_step = None
-    finally:
-        # The complete cards are rendered by this script run after the action.
-        live_area.empty()
+        st.session_state.clear_task = True
+    st.session_state.has_run = True
+    st.rerun()
 
 
 def main() -> None:
     st.set_page_config(page_title="Undo for Agents", page_icon="⏪", layout="wide")
     engine = _ensure_engine()
-
-    st.title("⏪ Undo for Agents")
-    st.caption("Agents make mistakes. Mine can time-travel.")
-
-    flash_error = st.session_state.pop("flash_error", None)
-    if flash_error:
-        st.error(flash_error)
 
     with st.sidebar:
         st.subheader("Session")
@@ -177,20 +248,45 @@ def main() -> None:
         steps = engine.steps()
         average = sum(step.fork_s for step in steps) / len(steps) if steps else 0.0
         st.write(f"Average fork time: `{average:.3f}s`")
+        show_diff = st.toggle("📂 Show what changed", value=True, key="show_diff")
+        self_undo = st.toggle("🩹 Let the agent undo its own mistakes", value=False, key="self_undo")
         if st.button("Reset", use_container_width=True):
             _reset_engine()
             st.rerun()
+    engine.track_files = show_diff
 
-    rewound_step = st.session_state.get("rewound_step")
-    if rewound_step is not None:
-        st.info(f"Rewound to before step {rewound_step}")
-        continuation = st.text_input("Continue from here", key="continuation")
-        if st.button("Continue", key="continue-agent"):
-            _run_agent(engine, continuation, st.empty())
+    st.title("⏪ Undo for Agents")
+    st.caption("Agents make mistakes. Mine can time-travel.")
 
-    task = st.text_area("Task", placeholder="Ask the agent what to do…", key="task")
+    if flash_error := st.session_state.pop("flash_error", None):
+        st.error(flash_error)
+    if flash_info := st.session_state.pop("flash_info", None):
+        st.info(flash_info)
+
+    banner = st.session_state.get("restore_banner")
+    if banner:
+        if show_diff and banner["restored"]:
+            st.success("⏪ Restored: " + ", ".join(banner["restored"]))
+            st.caption(f"Rewound to before step {banner['step']}.")
+        else:
+            st.info(f"⏪ Rewound to before step {banner['step']}.")
+
+    if st.session_state.get("last_agent_result"):
+        with st.expander("Agent response"):
+            st.write(st.session_state.last_agent_result)
+
+    st.subheader("Timeline")
+    timeline = st.empty()
+    with timeline.container():
+        _render_timeline(engine, show_diff, interactive=True)
+
+    if st.session_state.pop("clear_task", False):
+        st.session_state.task = ""
+    has_run = st.session_state.get("has_run") or bool(engine.steps())
+    label = "Next instruction" if has_run else "Task"
+    task = st.text_area(label, placeholder="Ask the agent what to do…", key="task")
     if st.button("Run", type="primary"):
-        _run_agent(engine, task, st.empty())
+        _run_agent(engine, task, timeline, show_diff, self_undo)
 
     if st.session_state.get("agent_unavailable", False):
         st.subheader("Run command")
@@ -200,21 +296,10 @@ def main() -> None:
                 try:
                     engine.run(command)
                 except Exception as exc:
-                    st.error(_friendly_error("Running the command", exc))
-                st.session_state.rewound_step = None
+                    st.session_state.flash_error = _friendly_error("Running the command", exc)
+                st.rerun()
             else:
                 st.warning("Enter a command first.")
-
-    if st.session_state.get("last_agent_result"):
-        with st.expander("Agent response"):
-            st.write(st.session_state.last_agent_result)
-
-    st.subheader("Timeline")
-    steps = engine.steps()
-    if not steps:
-        st.caption("No steps yet. Run a task or command to create the first checkpoint.")
-    for step in steps:
-        _render_step(step)
 
 
 main()
