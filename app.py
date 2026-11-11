@@ -12,6 +12,8 @@ from typing import Any, Optional
 import streamlit as st
 
 import agent
+import sessions_page
+import ui
 
 MAX_AGENT_STEPS = 8
 
@@ -118,60 +120,6 @@ def _hashes_before(engine: Any, index: int) -> Optional[dict[str, str]]:
     return getattr(engine, "initial_file_hashes", None)
 
 
-def _changed_files(a: Optional[dict[str, str]], b: Optional[dict[str, str]]) -> list[str]:
-    if a is None or b is None:
-        return []
-    return sorted(p for p in a.keys() | b.keys() if a.get(p) != b.get(p))
-
-
-def _md(text: str) -> str:
-    for ch in "\\`*_[]<>#|~$":
-        text = text.replace(ch, "\\" + ch)
-    return text
-
-
-def _render_chips(step: Any) -> None:
-    chips = (
-        [f":green-badge[+ {_md(p)}]" for p in getattr(step, "added", [])]
-        + [f":red-badge[− {_md(p)}]" for p in getattr(step, "removed", [])]
-        + [f":yellow-badge[\\~ {_md(p)}]" for p in getattr(step, "modified", [])]
-    )
-    if chips:
-        st.markdown(" ".join(chips))
-
-
-def _render_marker(marker: dict) -> None:
-    with st.container(border=True):
-        st.markdown(f"🩹 **Agent rewound to before step {marker['at'] + 1}:** {marker['reason']}")
-        if marker.get("restored"):
-            st.caption("Restored: " + ", ".join(marker["restored"]))
-
-
-def _render_step(step: Any, show_diff: bool, interactive: bool) -> None:
-    with st.container(border=True):
-        left, right = st.columns([4, 1])
-        left.subheader(f"Step {step.index + 1}")
-        color = "green" if step.exit_code == 0 else "red"
-        right.markdown(f":{color}[**Exit code: {step.exit_code}**]")
-
-        st.code(step.command, language="bash")
-        if show_diff:
-            _render_chips(step)
-        st.caption(f"Fork time: {step.fork_s:.3f}s")
-        with st.expander("Output"):
-            output = step.stdout
-            if step.stderr:
-                output += ("\n" if output else "") + step.stderr
-            st.code(output or "(no output)", language="text")
-
-        if interactive and st.button(
-            "⏪ Rewind to before this step",
-            key=f"rewind-{step.index}",
-            use_container_width=True,
-        ):
-            _rewind(step.index)
-
-
 def _render_timeline(engine: Any, show_diff: bool, interactive: bool) -> None:
     steps = engine.steps()
     markers = st.session_state.get("markers", [])
@@ -181,15 +129,23 @@ def _render_timeline(engine: Any, show_diff: bool, interactive: bool) -> None:
         for marker in markers:
             if marker["at"] == step.index:
                 _render_marker(marker)
-        _render_step(step, show_diff, interactive)
+        if ui.render_step(step, show_diff, rewind_key=f"rewind-{step.index}" if interactive else None):
+            _rewind(step.index)
     for marker in markers:
         if marker["at"] >= len(steps):
             _render_marker(marker)
 
 
+def _render_marker(marker: dict) -> None:
+    ui.render_marker(
+        f"🩹 **Agent rewound to before step {marker['at'] + 1}**",
+        marker["reason"], marker.get("restored", []), marker.get("removed", []),
+    )
+
+
 def _rewind(index: int) -> None:
     engine = st.session_state.engine
-    restored = _changed_files(_latest_hashes(engine), _hashes_before(engine, index))
+    restored, removed = ui.rewind_changes(_latest_hashes(engine), _hashes_before(engine, index))
     try:
         with st.spinner(f"Rewinding to before step {index + 1}…"):
             engine.rewind(index)
@@ -197,7 +153,7 @@ def _rewind(index: int) -> None:
         st.session_state.flash_error = _friendly_error("Rewind", exc)
     else:
         st.session_state.markers = [m for m in st.session_state.markers if m["at"] <= index]
-        st.session_state.restore_banner = {"step": index + 1, "restored": restored}
+        st.session_state.restore_banner = {"step": index + 1, "restored": restored, "removed": removed}
     st.rerun()
 
 
@@ -220,10 +176,10 @@ def _run_agent(engine: Any, instruction: str, timeline: Any, show_diff: bool, se
         redraw()
 
     def on_rewind(index: int, reason: str) -> None:
-        restored = _changed_files(last_hashes[0], _hashes_before(engine, index))
+        restored, removed = ui.rewind_changes(last_hashes[0], _hashes_before(engine, index))
         last_hashes[0] = _hashes_before(engine, index)
         markers = [m for m in st.session_state.markers if m["at"] <= index]
-        markers.append({"at": index, "reason": reason, "restored": restored})
+        markers.append({"at": index, "reason": reason, "restored": restored, "removed": removed})
         st.session_state.markers = markers
         redraw()
 
@@ -259,7 +215,6 @@ def _run_agent(engine: Any, instruction: str, timeline: Any, show_diff: bool, se
 
 
 def main() -> None:
-    st.set_page_config(page_title="Undo for Agents", page_icon="⏪", layout="wide")
     engine = _ensure_engine()
 
     with st.sidebar:
@@ -299,8 +254,9 @@ def main() -> None:
 
     banner = st.session_state.get("restore_banner")
     if banner:
-        if show_diff and banner["restored"]:
-            st.success("⏪ Restored: " + ", ".join(banner["restored"]))
+        summary = ui.rewind_summary(banner["restored"], banner.get("removed", [])) if show_diff else ""
+        if summary:
+            st.success(f"⏪ {summary}")
             st.caption(f"Rewound to before step {banner['step']}.")
         else:
             st.info(f"⏪ Rewound to before step {banner['step']}.")
@@ -336,4 +292,8 @@ def main() -> None:
                 st.warning("Enter a command first.")
 
 
-main()
+st.set_page_config(page_title="Undo for Agents", page_icon="⏪", layout="wide")
+st.navigation([
+    st.Page(main, title="Playground", icon="⏪", url_path="playground", default=True),
+    st.Page(sessions_page.render, title="Agent sessions", icon="🔌", url_path="sessions"),
+]).run()

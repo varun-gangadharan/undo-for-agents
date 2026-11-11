@@ -27,6 +27,17 @@ from dotenv import load_dotenv
 from contracts import Step
 
 
+def rewind_changes(
+    current: dict[str, str] | None, target: dict[str, str] | None
+) -> tuple[list[str], list[str]]:
+    """Files a rewind from `current` to `target` brings back or changes back, and files it removes."""
+    if current is None or target is None:
+        return [], []
+    restored = sorted(p for p in target if current.get(p) != target[p])
+    removed = sorted(p for p in current if p not in target)
+    return restored, removed
+
+
 def diff_files(
     before: dict[str, str] | None, after: dict[str, str]
 ) -> tuple[list[str], list[str], list[str]]:

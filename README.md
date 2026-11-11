@@ -69,7 +69,11 @@ claude mcp add undo -- /path/to/undo-for-agents/.venv/bin/python /path/to/undo-f
 codex mcp add undo -- /path/to/undo-for-agents/.venv/bin/python /path/to/undo-for-agents/mcp_server.py
 ```
 
-Cursor and VS Code take the same command in their MCP JSON config. Check the server without an agent: `python scripts/mcp_smoke.py fake` (offline) or `python scripts/mcp_smoke.py archil` (live).
+Cursor and VS Code take the same command in their MCP JSON config.
+
+### Watch and rewind from the browser
+
+Run `streamlit run app.py` and open **Agent sessions**. Every MCP session appears there live (labeled Claude Code, Codex, …) with its step timeline and file changes. Clicking **Rewind** queues the rewind; the agent's MCP server applies it between commands and tells the agent on its next tool call. Sessions are stored in `~/.undo-for-agents/undo.db` (override with `UNDO_DB`). Check the server without an agent: `python scripts/mcp_smoke.py fake` (offline) or `python scripts/mcp_smoke.py archil` (live).
 
 ## Future Work
 

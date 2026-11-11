@@ -4,6 +4,7 @@ Usage: .venv/bin/python scripts/mcp_smoke.py [fake|archil]
 """
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -15,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 async def main(kind: str) -> None:
     params = StdioServerParameters(
-        command=sys.executable, args=[str(ROOT / "mcp_server.py")], env={"ENGINE": kind}
+        command=sys.executable, args=[str(ROOT / "mcp_server.py")], env={**os.environ, "ENGINE": kind}
     )
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         init = await session.initialize()
