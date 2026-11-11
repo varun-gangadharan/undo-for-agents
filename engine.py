@@ -119,7 +119,8 @@ class ArchilEngine:
         if not 0 <= index < len(self._steps):
             raise IndexError(f"no step {index}")
 
-        checkpoint = self._checkpoints[index]
+        checkpoint = self._settle(self._checkpoints[index])
+        self._checkpoints[index] = checkpoint
         replacement = checkpoint.fork(name=self._fork_name(f"rewind-{index}"))
         self._track(replacement)
         replacement = self._ensure_running(replacement)
@@ -165,7 +166,13 @@ class ArchilEngine:
             started = time.perf_counter()
             checkpoint = current.fork(name=self._fork_name(f"checkpoint-{index}"))
             self._track(checkpoint)
-            return checkpoint, time.perf_counter() - started
+            fork_s = time.perf_counter() - started
+            # Only the live sandbox should run; a stopped checkpoint can still be forked.
+            try:
+                checkpoint = checkpoint.stop(wait=False)
+            except Exception:
+                pass
+            return checkpoint, fork_s
         return self._checkpoints[-1], 0.0
 
     def _store_checkpoint(self, index: int, checkpoint: Any) -> None:
@@ -231,6 +238,15 @@ class ArchilEngine:
         return self._current
 
     @staticmethod
+    def _settle(sandbox: Any, timeout_s: float = 30.0) -> Any:
+        """Wait out a stop started with wait=False so the sandbox can be forked."""
+        deadline = time.monotonic() + timeout_s
+        while getattr(sandbox, "status", None) == "stopping" and time.monotonic() < deadline:
+            time.sleep(0.5)
+            sandbox = sandbox.refresh()
+        return sandbox
+
+    @staticmethod
     def _stop(sandbox: Any) -> None:
         if sandbox is None or getattr(sandbox, "status", None) == "stopped":
             return
@@ -246,3 +262,37 @@ class ArchilEngine:
             self._sandboxes.pop(sandbox.id, None)
         except Exception:
             pass
+
+
+def purge_project_sandboxes(prefix: str = "undo-for-agents-", max_passes: int = 15) -> tuple[int, list[str]]:
+    """Stop and delete every sandbox whose name starts with prefix, from any session.
+
+    Archil has no parent links in its API, so deletion retries in passes: each pass
+    removes the sandboxes with no remaining children. Returns (deleted, leftover names).
+    """
+    import archil
+
+    load_dotenv()
+    gone = {"deleting", "deleted"}
+    remaining = [sb for sb in archil.list_sandboxes() if (sb.name or "").startswith(prefix) and sb.status not in gone]
+    for sb in remaining:
+        if sb.status not in {"stopped", "stopping", "exited", "failed"}:
+            try:
+                sb.stop(wait=False)
+            except Exception:
+                pass
+    deleted = 0
+    for attempt in range(max_passes):
+        if attempt:
+            time.sleep(2)
+        failed = []
+        for sb in remaining:
+            try:
+                sb.delete()
+                deleted += 1
+            except Exception:
+                failed.append(sb)
+        remaining = failed
+        if not remaining:
+            break
+    return deleted, [sb.name for sb in remaining]

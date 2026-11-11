@@ -86,6 +86,26 @@ def _reset_engine() -> None:
     _ensure_engine()
 
 
+def _purge_all() -> None:
+    from engine import purge_project_sandboxes
+
+    st.session_state.pop("engine", None)  # its sandboxes are about to be deleted too
+    for key in ("last_agent_result", "restore_banner"):
+        st.session_state.pop(key, None)
+    try:
+        with st.spinner("Deleting all project sandboxes…"):
+            deleted, leftover = purge_project_sandboxes()
+    except Exception as exc:
+        st.session_state.flash_error = _friendly_error("Deleting sandboxes", exc)
+    else:
+        msg = f"🧹 Deleted {deleted} sandbox{'es' if deleted != 1 else ''}."
+        if leftover:
+            st.session_state.flash_error = msg + f" {len(leftover)} could not be deleted: {', '.join(leftover)}"
+        else:
+            st.session_state.flash_success = msg
+    st.rerun()
+
+
 def _latest_hashes(engine: Any) -> Optional[dict[str, str]]:
     return _hashes_before(engine, len(engine.steps()))
 
@@ -253,6 +273,18 @@ def main() -> None:
         if st.button("Reset", use_container_width=True):
             _reset_engine()
             st.rerun()
+        if st.session_state.get("confirm_purge"):
+            st.warning("Deletes every `undo-for-agents-` sandbox on this Archil account, including other sessions'.")
+            yes, no = st.columns(2)
+            if yes.button("Delete all", type="primary", use_container_width=True):
+                st.session_state.confirm_purge = False
+                _purge_all()
+            if no.button("Cancel", use_container_width=True):
+                st.session_state.confirm_purge = False
+                st.rerun()
+        elif st.button("🧹 Delete all project sandboxes", use_container_width=True):
+            st.session_state.confirm_purge = True
+            st.rerun()
     engine.track_files = show_diff
 
     st.title("⏪ Undo for Agents")
@@ -262,6 +294,8 @@ def main() -> None:
         st.error(flash_error)
     if flash_info := st.session_state.pop("flash_info", None):
         st.info(flash_info)
+    if flash_success := st.session_state.pop("flash_success", None):
+        st.success(flash_success)
 
     banner = st.session_state.get("restore_banner")
     if banner:
