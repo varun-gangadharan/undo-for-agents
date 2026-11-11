@@ -158,6 +158,10 @@ class ArchilEngine:
         self._sandboxes = {sb.id: sb for sb in reversed(remaining)}
         return [sb.id for sb in remaining]
 
+    def sandbox_ids(self) -> list[str]:
+        """Ids of every sandbox this engine created, children first."""
+        return list(reversed(self._sandboxes))
+
     def _checkpoint_for(self, cmd: str, current: Any, index: int) -> tuple[Any, float]:
         if index < len(self._checkpoints):
             # Right after rewind(index) the kept checkpoint already matches the live state.
@@ -283,6 +287,11 @@ def purge_project_sandboxes(prefix: str = "undo-for-agents-", max_passes: int = 
     load_dotenv()
     gone = {"deleting", "deleted"}
     remaining = [sb for sb in archil.list_sandboxes() if (sb.name or "").startswith(prefix) and sb.status not in gone]
+    return delete_children_first(remaining, max_passes)
+
+
+def delete_children_first(remaining: list[Any], max_passes: int = 15) -> tuple[int, list[str]]:
+    """Stop and delete sandboxes, retrying passes until parents no longer have children."""
     for sb in remaining:
         if sb.status not in {"stopped", "stopping", "exited", "failed"}:
             try:
@@ -304,3 +313,4 @@ def purge_project_sandboxes(prefix: str = "undo-for-agents-", max_passes: int = 
         if not remaining:
             break
     return deleted, [sb.name for sb in remaining]
+

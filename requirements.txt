@@ -4,3 +4,4 @@ keenable==0.1.3
 streamlit==1.67.0
 pyarrow==26.0.1
 python-dotenv==1.2.4
+mcp==2.3.0

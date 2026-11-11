@@ -55,6 +55,22 @@ For a terminal-only fallback, run:
 python scripts/cli_demo.py
 ```
 
+## Use it from your own agent (MCP)
+
+`mcp_server.py` exposes the sandbox to any MCP client (Claude Code, Codex, Cursor, VS Code Copilot), so your agent on your own subscription gets checkpointed commands and undo. Tools: `run`, `rewind`, `timeline`, `reset`. Sandboxes are deleted automatically when the agent session ends.
+
+Use absolute paths to this repo's venv Python and `mcp_server.py`:
+
+```bash
+# Claude Code
+claude mcp add undo -- /path/to/undo-for-agents/.venv/bin/python /path/to/undo-for-agents/mcp_server.py
+
+# Codex
+codex mcp add undo -- /path/to/undo-for-agents/.venv/bin/python /path/to/undo-for-agents/mcp_server.py
+```
+
+Cursor and VS Code take the same command in their MCP JSON config. Check the server without an agent: `python scripts/mcp_smoke.py fake` (offline) or `python scripts/mcp_smoke.py archil` (live).
+
 ## Future Work
 
 Branch one checkpoint into a swarm of parallel agents.
