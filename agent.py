@@ -20,10 +20,12 @@ MAX_OUTPUT = 3000
 
 SYSTEM_PROMPT = (
     "You are an agent working inside a Linux sandbox. The working directory is /workspace. "
-    "Complete the user's task by running one shell command at a time with the run_bash tool, "
-    "preferring small, simple commands and checking their output before moving on. "
-    "The sandbox is Debian with python3 but no pip; if you need pytest, run "
-    "`apt-get update -qq && apt-get install -y -qq python3-pytest` and use `python3 -m pytest`. "
+    "Complete the user's task with the run_bash tool. Each run_bash call must be exactly ONE "
+    "simple command: never chain commands with &&, ;, || or |, because every call becomes a "
+    "separate rewindable checkpoint. Create each file with its own command. "
+    "Check each command's output before moving on. "
+    "The sandbox is Debian with python3 but no pip. If you need pytest, run "
+    "`apt-get update -qq`, then `apt-get install -y -qq python3-pytest`, then use `python3 -m pytest`. "
     "Use web_search only if you need information you don't have. "
     "When the task is done, stop calling tools and reply with a one-sentence summary."
 )
