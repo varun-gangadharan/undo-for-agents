@@ -90,7 +90,7 @@ class ArchilEngine:
         self.initial_file_hashes = self._hash_files(sandbox) if self.track_files else None
 
     def run(self, cmd: str) -> Step:
-        current = self._require_current()
+        current = self._wake()
         index = len(self._steps)
         checkpoint, fork_s = self._checkpoint_for(cmd, current, index)
 
@@ -232,6 +232,14 @@ class ArchilEngine:
         stderr = getattr(result, "stderr", "")
         return f"{cmd!r} failed with exit code {result.exit_code}: {stderr}"
 
+    def _wake(self) -> Any:
+        """Return the live sandbox, resuming it if Archil paused it for being idle (30 min)."""
+        current = self._require_current().refresh()
+        if current.status != "running":
+            current = self._ensure_running(self._settle(current))
+        self._current = current
+        return current
+
     def _require_current(self) -> Any:
         if self._current is None:
             raise RuntimeError("call start() first")
@@ -239,9 +247,9 @@ class ArchilEngine:
 
     @staticmethod
     def _settle(sandbox: Any, timeout_s: float = 30.0) -> Any:
-        """Wait out a stop started with wait=False so the sandbox can be forked."""
+        """Wait out an in-progress stop or pause so the sandbox can be forked or resumed."""
         deadline = time.monotonic() + timeout_s
-        while getattr(sandbox, "status", None) == "stopping" and time.monotonic() < deadline:
+        while getattr(sandbox, "status", None) in ("stopping", "pausing") and time.monotonic() < deadline:
             time.sleep(0.5)
             sandbox = sandbox.refresh()
         return sandbox
