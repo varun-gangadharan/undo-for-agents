@@ -1,5 +1,6 @@
-archil
-anthropic
-keenable
-streamlit
-python-dotenv
+archil==0.21.0
+anthropic==2.8.0
+keenable==0.1.3
+streamlit==1.67.0
+pyarrow==26.0.1
+python-dotenv==1.2.4
